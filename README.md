@@ -106,7 +106,7 @@ In one observed recovery, pairing and connecting the speaker's **audio endpoint 
 
 However, a separate attempt to connect Bluetooth audio using Windows Settings while the speaker stayed in USB failed. An uncached Classic service query also did not establish an audio connection. This update therefore does not claim to force the Classic/A2DP profile to connect or wake a speaker that is not advertising. If discovery remains unavailable, select Bluetooth on the speaker and connect it in Windows, then retry control.
 
-Actual full-PC reboot, sleep/wake, and speaker power-cycle acceptance remain pending. The native discovery path was checked against the real speaker with the first address lookup deliberately simulated as missing; this is narrower evidence than a real cold boot.
+A real PC restart with the speaker left in USB has now passed: the first address lookup returned no device, automatic discovery observed the target, and the second lookup resolved it. Source, preset, Custom gains and volume were then read successfully. This is one tested reboot scenario, not a guarantee for every adapter or firmware. Physical sleep/wake and speaker power-cycle acceptance remain pending; Windows login autostart is a separate check. See [reboot validation](docs/reboot-validation.md).
 
 ## Validation and limits
 

@@ -26,6 +26,7 @@ The optional self-contained publishing script was syntax-checked, but a self-con
 - Real Windows discovery after a simulated missing first lookup: passed; target advertisement observed, second lookup resolved, and watcher cleanup completed. This was not a real reboot.
 - Installed configured build: actual first-open read passed in USB with Monitor and volume 12/30.
 - Windows Classic audio Connect in USB: failed; no automatic Classic/A2DP reconnect is claimed.
-- Full PC reboot, real sleep/wake and speaker power cycle: **pending**. Preserve this distinction when reporting compatibility.
+- Real PC restart with the speaker left in USB: **passed** on 2026-09-09; first lookup missed, automatic discovery found the target, second lookup resolved, all four reads completed. See [reboot validation](reboot-validation.md).
+- Physical sleep/wake and speaker power cycle: **pending**. Windows login autostart is separate and not yet established.
 
 The recovery code uses the same protocol frames and pre-write identity/confirmation rules. No persistent exclusive GATT lease, repeated pairing, radio toggle, or driver reset was added. Initial build warnings concerned unavailable NuGet vulnerability metadata; later publishing completed successfully. An online dependency security audit is not claimed.
