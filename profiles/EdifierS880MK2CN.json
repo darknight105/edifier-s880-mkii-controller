@@ -1,0 +1,72 @@
+{
+  "profileId": "EdifierS880MK2CN",
+  "model": "EDIFIER S880 MKII",
+  "market": "China mainland",
+  "boundDevice": {
+    "address": "",
+    "addressType": "public"
+  },
+  "identityQuery": {
+    "command": "C9",
+    "request": "AAECC900005F",
+    "expectedAsciiPayload": "EDIFIER S880 MKII"
+  },
+  "serviceUuids": [
+    "48098801-1a48-11e9-ab14-d663bd873d93"
+  ],
+  "characteristicUuids": [
+    {
+      "uuid": "48090001-1a48-11e9-ab14-d663bd873d93",
+      "role": "incoming-notify",
+      "requiredProperties": ["notify"]
+    },
+    {
+      "uuid": "48090002-1a48-11e9-ab14-d663bd873d93",
+      "role": "outgoing-write",
+      "writeMode": "write-without-response"
+    }
+  ],
+  "protocol": {
+    "transportFraming": "AA/BB EC command lengthHi lengthLo payload checksum8",
+    "checksum": "sum of all preceding frame bytes modulo 256",
+    "source": {
+      "queryCommand": "61",
+      "setCommand": "62",
+      "setPayloadPrefix": "10",
+      "successAckPayload": "01",
+      "values": {
+        "01": "usb",
+        "02": "line-in-1",
+        "03": "line-in-2",
+        "04": "bluetooth",
+        "05": "optical",
+        "06": "coaxial"
+      }
+    },
+    "eq": {
+      "presetQueryCommand": "D5",
+      "presetSetCommand": "C4",
+      "customQueryCommand": "43",
+      "singleBandGainSetCommand": "44",
+      "customFormat": "03",
+      "bandCount": 6,
+      "allowedBands": [1, 2, 3, 4, 5, 6],
+      "gainDbMinimum": -3,
+      "gainDbMaximum": 3,
+      "gainDbStep": 0.5,
+      "frequenciesHz": [62, 250, 1000, 4000, 8000, 16000]
+    },
+    "volume": {
+      "queryCommand": "66",
+      "setCommand": "67",
+      "minimum": 0,
+      "maximum": 30
+    }
+  },
+  "safety": {
+    "identityRequiredBeforeControl": true,
+    "expectedProductName": "EDIFIER S880 MKII",
+    "configuredPublicAddressRequired": true,
+    "unsupportedWritesEnabled": false
+  }
+}

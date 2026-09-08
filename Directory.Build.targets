@@ -1,0 +1,31 @@
+<Project>
+  <Target Name="ValidateSpeakerAddress" BeforeTargets="PrepareForBuild" Condition="'$(SpeakerAddress)' != ''">
+    <Error
+      Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(SpeakerAddress)', '^([0-9A-Fa-f]{12}|(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})$'))"
+      Text="SpeakerAddress must be a 48-bit Bluetooth address, for example AA:BB:CC:DD:EE:FF." />
+    <Error
+      Condition="'$(_SpeakerAddressCompact)' == '000000000000'"
+      Text="SpeakerAddress cannot be the all-zero address." />
+  </Target>
+
+  <PropertyGroup>
+    <SpeakerProfileTemplate>$(MSBuildThisFileDirectory)profiles\EdifierS880MK2CN.json</SpeakerProfileTemplate>
+  </PropertyGroup>
+
+  <Target Name="GenerateTraySpeakerProfile"
+          BeforeTargets="CopyControllerBackend"
+          DependsOnTargets="ValidateSpeakerAddress"
+          Condition="'$(MSBuildProjectName)' == 'S880Tray' And '$(PortablePayloadDir)' == ''">
+    <PropertyGroup>
+      <GeneratedSpeakerProfile>$(IntermediateOutputPath)profiles\EdifierS880MK2CN.json</GeneratedSpeakerProfile>
+    </PropertyGroup>
+    <Exec Command="powershell.exe -NoProfile -File &quot;$(MSBuildThisFileDirectory)scripts\New-SpeakerProfile.ps1&quot; -TemplatePath &quot;$(SpeakerProfileTemplate)&quot; -OutputPath &quot;$(GeneratedSpeakerProfile)&quot; -SpeakerAddress &quot;$(_SpeakerAddressNormalized)&quot;" />
+  </Target>
+
+  <Target Name="GenerateTestSpeakerProfile"
+          AfterTargets="Build"
+          DependsOnTargets="ValidateSpeakerAddress"
+          Condition="'$(MSBuildProjectName)' == 'S880Ctl.Tests'">
+    <Exec Command="powershell.exe -NoProfile -File &quot;$(MSBuildThisFileDirectory)scripts\New-SpeakerProfile.ps1&quot; -TemplatePath &quot;$(SpeakerProfileTemplate)&quot; -OutputPath &quot;$(OutDir)EdifierS880MK2CN.json&quot; -SpeakerAddress &quot;$(_SpeakerAddressNormalized)&quot;" />
+  </Target>
+</Project>

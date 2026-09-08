@@ -1,0 +1,32 @@
+# Build output and private, device-bound packages
+**/bin/
+**/obj/
+artifacts/
+work/
+outputs/
+data/
+**/payload-cache/
+*.zip
+*.exe
+*.dll
+*.pdb
+*.msi
+*.lnk
+*.log
+# Local IDE, device configuration, captures, and credentials
+.vs/
+.idea/
+*.user
+*.suo
+*.local.*
+.env
+.env.*
+!.env.example
+*bugreport*
+*.btsnoop
+*.pcap
+*.pcapng
+*.apk
+*.hprof
+Thumbs.db
+.DS_Store

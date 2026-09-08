@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/S880Ctl/S880Ctl.csproj" />
+  <Project Path="src/S880Tray/S880Tray.csproj" />
+  <Project Path="tests/S880Ctl.Tests/S880Ctl.Tests.csproj" />
+</Solution>

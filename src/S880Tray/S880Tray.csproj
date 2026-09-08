@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>S880Controller</AssemblyName>
+    <ApplicationIcon>Assets\s880-controller.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../S880Ctl/S880Ctl.csproj" ReferenceOutputAssembly="false" />
+    <Resource Include="Assets\s880-controller.ico" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PortablePayloadDir)' != ''">
+    <EmbeddedResource Include="$(PortablePayloadDir)\s880ctl.exe" LogicalName="S880Tray.Portable.s880ctl.exe" />
+    <EmbeddedResource Include="$(PortablePayloadDir)\EdifierS880MK2CN.json" LogicalName="S880Tray.Portable.EdifierS880MK2CN.json" />
+    <EmbeddedResource Include="$(PortablePayloadDir)\payload-manifest.json" LogicalName="S880Tray.Portable.payload-manifest.json" />
+  </ItemGroup>
+  <Target Name="CopyControllerBackend" AfterTargets="Build" Condition="'$(PortablePayloadDir)' == ''">
+    <ItemGroup>
+      <BackendFiles Include="../S880Ctl/bin/$(Configuration)/$(TargetFramework)/**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(BackendFiles)" DestinationFiles="@(BackendFiles->'$(OutDir)backend/%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy SourceFiles="$(GeneratedSpeakerProfile)" DestinationFolder="$(OutDir)profiles" />
+  </Target>
+</Project>

@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <SpeakerAddress Condition="'$(SpeakerAddress)' == ''"></SpeakerAddress>
+    <_SpeakerAddressCompact>$([System.String]::Copy('$(SpeakerAddress)').Replace(':', '').Replace('-', '').ToUpperInvariant())</_SpeakerAddressCompact>
+    <_SpeakerAddressNormalized Condition="'$(_SpeakerAddressCompact)' != ''">$([System.Text.RegularExpressions.Regex]::Replace('$(_SpeakerAddressCompact)', '(.{2})(?!$)', '$1:'))</_SpeakerAddressNormalized>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'S880Ctl' Or '$(MSBuildProjectName)' == 'S880Tray'">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>SpeakerAddress</_Parameter1>
+      <_Parameter2>$(_SpeakerAddressNormalized)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>

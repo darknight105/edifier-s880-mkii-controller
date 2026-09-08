@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">S880 Controller symbol</title>
+  <desc id="desc">A compact speaker cabinet with a teal driver and control light on a dark rounded square.</desc>
+  <g id="app-icon">
+    <rect id="background" x="6" y="6" width="88" height="88" rx="22" fill="#20272B"/>
+    <g id="speaker" fill="#F4F6F7">
+      <rect x="28" y="19" width="44" height="62" rx="11"/>
+      <circle cx="50" cy="42" r="12" fill="#1F6E82"/>
+      <circle cx="50" cy="42" r="5" fill="#20272B"/>
+      <rect x="42" y="62" width="16" height="7" rx="3.5" fill="#20272B"/>
+      <circle cx="50" cy="65.5" r="2.5" fill="#1F6E82"/>
+    </g>
+    <path id="control-mark" d="M79 36v28" fill="none" stroke="#1F6E82" stroke-width="4" stroke-linecap="round"/>
+  </g>
+</svg>
