@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -92,8 +93,29 @@ internal sealed class Backend : IControllerBackend
 
     internal static string DescribeFailure(JsonElement report, string reportPath)
     {
-        if (report.TryGetProperty("status", out var status) && status.GetString() == "outcome-uncertain")
+        if (report.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.String && status.GetString() == "outcome-uncertain")
             return "The operation result is unconfirmed; some changes may have taken effect. Refresh before trying again.";
+
+        if (IsConnectionCategory(report))
+        {
+            var failureKind = ReadString(report, "failureKind");
+            var stage = ReadString(report, "stage");
+            string? connectionMessage = null;
+            if (report.TryGetProperty("connection", out var connection) && connection.ValueKind == JsonValueKind.Object)
+                connectionMessage = ReadString(connection, "message");
+            var nextStep = failureKind switch
+            {
+                "adapter-off" => "Turn on Bluetooth in Windows.",
+                "adapter-unavailable" => "Check that the Windows Bluetooth adapter is enabled.",
+                "low-energy-unsupported" or "central-role-unsupported" => "This Bluetooth adapter cannot provide the required control connection.",
+                "target-advertisement-timeout" => "The speaker control target was not discovered. Check Windows Bluetooth and make the speaker's Bluetooth input or control service available.",
+                "target-advertised-unresolved" => "The speaker was discovered, but Windows could not open its control endpoint. Keep it powered on and try the read again.",
+                _ => "Keep the speaker powered on and nearby."
+            };
+            var detail = string.Join(" · ", new[] { stage, failureKind, connectionMessage }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            return "Windows could not reach the speaker's Bluetooth control service. " + SafetySentence(report) + nextStep +
+                (detail.Length == 0 ? "" : "\nDetails: " + detail) + "\nReport: " + reportPath;
+        }
 
         string? discoveryError = null;
         if (report.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array)
@@ -109,20 +131,37 @@ internal sealed class Backend : IControllerBackend
         }
         if (discoveryError is null) return "The operation did not complete. Check the speaker and Bluetooth, then refresh.";
 
-        var noSettingSent = false;
-        if (report.TryGetProperty("safety", out var safety) && safety.ValueKind == JsonValueKind.Object &&
-            safety.TryGetProperty("attemptedWritesHex", out var attempts) && attempts.ValueKind == JsonValueKind.Array && attempts.GetArrayLength() == 0)
-        {
-            var sourceFlag = safety.TryGetProperty("setAttempted", out var sourceAttempt);
-            var eqFlag = safety.TryGetProperty("stateChangingCommandSent", out var eqAttempt);
-            noSettingSent = (sourceFlag && sourceAttempt.ValueKind == JsonValueKind.False || eqFlag && eqAttempt.ValueKind == JsonValueKind.False)
-                && (!sourceFlag || sourceAttempt.ValueKind == JsonValueKind.False)
-                && (!eqFlag || eqAttempt.ValueKind == JsonValueKind.False);
-        }
         return "Windows could not reach the speaker's Bluetooth control service. " +
-            (noSettingSent ? "No setting command was sent. " : "") +
-            "If EDIFIER Connect is running, force stop it in your phone settings. Switch the speaker to Bluetooth with its remote, then refresh." +
+            SafetySentence(report) +
+            "Check Windows Bluetooth and make the speaker's Bluetooth input or control service available, then refresh." +
             "\nDetails: " + discoveryError + "\nReport: " + reportPath;
+    }
+
+    internal static bool IsConnectionCategory(JsonElement report)
+    {
+        if (report.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.String &&
+            string.Equals(status.GetString(), "outcome-uncertain", StringComparison.OrdinalIgnoreCase)) return false;
+        return report.TryGetProperty("errorCategory", out var category) && category.ValueKind == JsonValueKind.String &&
+            string.Equals(category.GetString(), "connection", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool ShouldRetryRead(JsonElement report) =>
+        IsConnectionCategory(report) && report.TryGetProperty("retryable", out var retryable) && retryable.ValueKind == JsonValueKind.True;
+
+    private static string? ReadString(JsonElement value, string property) =>
+        value.TryGetProperty(property, out var result) && result.ValueKind == JsonValueKind.String ? result.GetString() : null;
+
+    private static string SafetySentence(JsonElement report)
+    {
+        if (!report.TryGetProperty("safety", out var safety) || safety.ValueKind != JsonValueKind.Object ||
+            !safety.TryGetProperty("attemptedWritesHex", out var attempts) || attempts.ValueKind != JsonValueKind.Array || attempts.GetArrayLength() != 0)
+            return "";
+        var sourceFlag = safety.TryGetProperty("setAttempted", out var sourceAttempt);
+        var eqFlag = safety.TryGetProperty("stateChangingCommandSent", out var eqAttempt);
+        var noSettingSent = (sourceFlag && sourceAttempt.ValueKind == JsonValueKind.False || eqFlag && eqAttempt.ValueKind == JsonValueKind.False)
+            && (!sourceFlag || sourceAttempt.ValueKind == JsonValueKind.False)
+            && (!eqFlag || eqAttempt.ValueKind == JsonValueKind.False);
+        return noSettingSent ? "No setting command was sent. " : "";
     }
 }
 
@@ -130,4 +169,8 @@ internal sealed class BackendException(string message, JsonElement report, strin
 {
     public JsonElement Report { get; } = report;
     public string ReportPath { get; } = path;
+    public bool IsConnectionFailure { get; } = Backend.IsConnectionCategory(report);
+    public bool ShouldRetryRead { get; } = Backend.ShouldRetryRead(report);
+    public string? FailureKind { get; } = report.TryGetProperty("failureKind", out var kind) && kind.ValueKind == JsonValueKind.String ? kind.GetString() : null;
+    public string? Stage { get; } = report.TryGetProperty("stage", out var stage) && stage.ValueKind == JsonValueKind.String ? stage.GetString() : null;
 }

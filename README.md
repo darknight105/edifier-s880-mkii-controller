@@ -24,7 +24,7 @@ Light is the default theme. The images below are renders of the actual WPF inter
 
 ## Features
 
-- **Automatic first read:** opening the panel reads the input, preset, saved Custom gains, and volume. Reopening the panel preserves pending edits.
+- **Automatic first read and recovery:** opening the panel reads the input, preset, saved Custom gains, and volume. A missing BLE endpoint triggers a bounded exact-address scan; transient failures can retry reads up to three times. Setting commands are never replayed. Reopening preserves pending edits.
 - **Six inputs:** USB, Bluetooth, Optical, Coaxial, Line In 1, and Line In 2.
 - **Speaker volume:** 0–30, applied when you release the slider and confirmed by device readback.
 - **Sound presets:** Classic, Monitor, Dynamic, Vocal, and Custom.
@@ -91,6 +91,22 @@ Keep `Switch to USB.vbs` beside the EXE. A generated `.lnk` shortcut refers to i
 EDIFIER Connect can retain the speaker's control session after its page is closed. If Windows cannot connect, use **Force Stop** for EDIFIER Connect in Android settings and retry.
 
 The verified recovery sequence is to select Bluetooth with the physical remote, allow phone audio to connect, and keep EDIFIER Connect force-stopped. Windows can then select USB. Availability after cold power-on into USB or a long idle period may depend on the speaker and adapter; it has not been established across devices.
+
+## Connection recovery
+
+The controller first tries the configured BLE address. If Windows has no device reference, it checks Bluetooth availability and scans for that exact address and address type for up to 10 seconds before trying resolution again. All model identity and setting-confirmation checks still apply.
+
+Transient connection failures may schedule up to three **read-only** retries, with delays of 2, 5 and 10 seconds between attempts. Unsupported adapters, access denial, protocol/identity failures, user cancellation, and uncertain writes are not automatically retried. Each command retains its own time budget; retry delays are not a promise of a fixed overall recovery time.
+
+After Windows resumes, a previously opened controller session schedules a coalesced read after any active operation. Pending Custom edits are preserved. Manual actions cancel pending automatic work. Quiet tray startup stays quiet until the first panel opening. A failed setting request is never replayed; after a recovery read, review the state before requesting that change again.
+
+### Hardware boundary
+
+In one observed recovery, pairing and connecting the speaker's **audio endpoint directly from Windows** made its BLE control advertisements available. A phone was not needed. BLE control continued after switching the speaker back to USB, even though the audio connection disconnected.
+
+However, a separate attempt to connect Bluetooth audio using Windows Settings while the speaker stayed in USB failed. An uncached Classic service query also did not establish an audio connection. This update therefore does not claim to force the Classic/A2DP profile to connect or wake a speaker that is not advertising. If discovery remains unavailable, select Bluetooth on the speaker and connect it in Windows, then retry control.
+
+Actual full-PC reboot, sleep/wake, and speaker power-cycle acceptance remain pending. The native discovery path was checked against the real speaker with the first address lookup deliberately simulated as missing; this is narrower evidence than a real cold boot.
 
 ## Validation and limits
 

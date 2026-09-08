@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
+using Microsoft.Win32;
 
 namespace S880Tray;
 
@@ -15,6 +16,7 @@ public partial class App : Application
     private Mutex? _instance;
     private InstanceActivation? _activation;
     private PortableInstanceActivation? _portableActivation;
+    private bool _powerModeSubscribed;
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -105,6 +107,15 @@ public partial class App : Application
                 Shutdown(success ? 0 : 1); return;
             }
             window.Height = Math.Max(window.MinHeight, Math.Min(window.Height, SystemParameters.WorkArea.Height - 32));
+            if (backend is not null)
+            {
+                try
+                {
+                    SystemEvents.PowerModeChanged += SystemPowerModeChanged;
+                    _powerModeSubscribed = true;
+                }
+                catch (PlatformNotSupportedException) { }
+            }
             _activation = new InstanceActivation(instanceName, window);
             _portableActivation = new PortableInstanceActivation(instanceName, window);
             window.CreateTray();
@@ -120,10 +131,20 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        if (_powerModeSubscribed) { SystemEvents.PowerModeChanged -= SystemPowerModeChanged; _powerModeSubscribed = false; }
         _activation?.Dispose();
         _portableActivation?.Dispose();
         if (_instance is not null) { _instance.ReleaseMutex(); _instance.Dispose(); }
         base.OnExit(e);
+    }
+
+    private void SystemPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != PowerModes.Resume || Dispatcher.HasShutdownStarted) return;
+        _ = Dispatcher.InvokeAsync(() =>
+        {
+            if (MainWindow is S880Tray.MainWindow window) window.HandleSystemResume();
+        }, DispatcherPriority.Background);
     }
 
     private async Task RunSwitchUsbAsync(string dataDirectory)

@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -45,16 +46,25 @@ public partial class MainWindow : Window
     private Task _operation = Task.CompletedTask;
     private Task _initialRefresh = Task.CompletedTask;
     private bool _initialRefreshStarted;
+    private readonly IReadOnlyList<TimeSpan> _recoveryDelays;
+    private readonly TimeSpan _resumeReadDelay;
+    private CancellationTokenSource? _recoveryCancellation;
+    private Task _recoveryTask = Task.CompletedTask;
+    private bool _lastFailureCanRetry;
     public bool LastOperationSucceeded { get; private set; }
     public string? LastError { get; private set; }
     internal double LifecycleDraft { get => _sliders[2].Value; set => _sliders[2].Value = value; }
     internal bool LifecycleBusy => _busy;
+    internal string LifecycleConnection => ConnectionText.Text;
     internal Task WaitForInitialRefreshAsync() => _initialRefresh;
+    internal Task WaitForRecoveryAsync() => _recoveryTask;
 
-    internal MainWindow(IControllerBackend? backend, bool preview, string? startupError = null)
+    internal MainWindow(IControllerBackend? backend, bool preview, string? startupError = null, IReadOnlyList<TimeSpan>? recoveryDelays = null, TimeSpan? resumeReadDelay = null)
     {
         InitializeComponent();
         _backend = backend; _preview = preview;
+        _recoveryDelays = recoveryDelays ?? new[] { TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10) };
+        _resumeReadDelay = resumeReadDelay ?? TimeSpan.FromMilliseconds(750);
         ThemeService.Apply(Resources, false);
         if (backend is Backend && !preview)
         {
@@ -197,17 +207,30 @@ public partial class MainWindow : Window
         if (!_exitRequested) await RefreshAsync();
     }
     private void WindowClosing(object? sender, CancelEventArgs e) { if (!_allowClose) { e.Cancel = true; Hide(); } }
-    internal async Task RequestExitAsync()
+    internal async Task RequestExitAsync(bool shutdownApplication = true)
     {
-        _exitRequested = true; SetControls();
+        _exitRequested = true; CancelAutomaticRecovery(); SetControls();
         if (_busy) { ShowPanel(); MessageText.Text = "Waiting for the current operation to finish before exiting, so an in-flight write is not interrupted."; await _operation; }
-        _tray?.Dispose(); _tray = null; _allowClose = true; Close(); Application.Current.Shutdown();
+        await _recoveryTask;
+        _tray?.Dispose(); _tray = null; _allowClose = true; Close();
+        if (shutdownApplication) Application.Current.Shutdown();
     }
     private Task<JsonElement> Call(params string[] command) => (_backend ?? throw new InvalidOperationException("The control program or configuration is unavailable.")).RunAsync(command);
     private async void RefreshClick(object sender, RoutedEventArgs e) => await RefreshAsync();
     internal async Task<bool> SelectSourceUsbAsync()
     {
-        while (_busy && !_exitRequested) await _operation;
+        CancelAutomaticRecovery();
+        if (_busy && !_exitRequested)
+        {
+            var existingOperation = _operation;
+            if (await Task.WhenAny(existingOperation, Task.Delay(TimeSpan.FromSeconds(45))) != existingOperation)
+            {
+                LastOperationSucceeded = false;
+                LastError = "The running controller is still finishing another speaker operation. No second Bluetooth process was started.";
+                return false;
+            }
+            await existingOperation;
+        }
         return await OperateAsync(async () =>
         {
             var response = await Call("source", "usb");
@@ -216,16 +239,17 @@ public partial class MainWindow : Window
                 throw new InvalidDataException("The speaker did not confirm USB as the input source.");
         });
     }
-    internal Task RefreshAsync() => OperateAsync(async () =>
+    internal Task RefreshAsync() => OperateAsync(() => RefreshCoreAsync(preserveCustomDrafts: false), OperationPurpose.Read);
+    private async Task RefreshCoreAsync(bool preserveCustomDrafts)
     {
         ApplySource(await Call("source", "get"));
         if (_exitRequested) return;
         var preset = await Call("eq", "get"); SetPreset(preset.GetProperty("result").GetProperty("presetName").GetString(), Timestamp(preset));
         if (_exitRequested) return;
-        await ReadCustomGainsAsync();
+        await ReadCustomGainsAsync(preserveCustomDrafts);
         if (_exitRequested) return;
         ApplyVolume(await Call("volume", "get"));
-    });
+    }
     private void ApplyVolume(JsonElement report)
     {
         var result = report.GetProperty("result");
@@ -263,7 +287,7 @@ public partial class MainWindow : Window
         if (_exitRequested) return;
         await ReadCustomGainsAsync();
     });
-    private async Task ReadCustomGainsAsync()
+    private async Task ReadCustomGainsAsync(bool preserveDrafts = false)
     {
         var gains = await Call("eq", "custom-get");
         var result = gains.GetProperty("result");
@@ -276,7 +300,7 @@ public partial class MainWindow : Window
             _operationNote = "The speaker returned an unsupported custom format, so gain adjustment is disabled. Input and preset controls remain available.";
             return;
         }
-        ApplyBands(bands); GainTimeText.Text = "Read at " + Timestamp(gains);
+        ApplyBands(bands, preserveDrafts); GainTimeText.Text = "Read at " + Timestamp(gains);
     }
     private static bool IsGainKey(Key key) => key is Key.Up or Key.Down or Key.Left or Key.Right or Key.PageUp or Key.PageDown or Key.Home or Key.End;
     private void ArmUserGesture(int index) { if (!_busy && !_preview && _loadedGains && !_exitRequested) _userGesture[index] = true; }
@@ -308,25 +332,164 @@ public partial class MainWindow : Window
                 GainTimeText.Text = "Read at " + Timestamp(response);
             }
         });
-    private async Task<bool> OperateAsync(Func<Task> action)
+    private async Task<bool> OperateAsync(Func<Task> action, OperationPurpose purpose = OperationPurpose.Write, bool automaticRecoveryAttempt = false)
     {
+        if (!automaticRecoveryAttempt) CancelAutomaticRecovery();
         if (_busy || _preview || _backend is null || _exitRequested) return false;
         var succeeded = false;
-        _busy = true; LastOperationSucceeded = false; LastError = null; _operationNote = null; ConnectionText.Text = "Working"; MessageText.Text = "Reading or updating the speaker…"; SetControls();
+        BackendException? connectionFailure = null;
+        _busy = true; LastOperationSucceeded = false; LastError = null; _lastFailureCanRetry = false; _operationNote = null;
+        ConnectionText.Text = automaticRecoveryAttempt ? "Retrying" : purpose == OperationPurpose.Read ? "Finding speaker" : "Connecting";
+        MessageText.Text = automaticRecoveryAttempt ? "Reading the speaker again…" : purpose == OperationPurpose.Read ? "Finding and reading the speaker…" : "Connecting to update the speaker…";
+        SetControls();
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); _operation = completion.Task;
-        try { await action(); succeeded = true; LastOperationSucceeded = true; ConnectionText.Text = "Idle"; MessageText.Text = _operationNote ?? "Operation complete. The display shows the latest read result."; DetailsExpander.IsExpanded = false; }
+        try { await action(); succeeded = true; LastOperationSucceeded = true; ConnectionText.Text = purpose == OperationPurpose.Read ? "Ready" : "Updated"; MessageText.Text = _operationNote ?? "Operation complete. The display shows the latest read result."; DetailsExpander.IsExpanded = false; }
         catch (Exception error)
         {
-            LastError = error.Message; ConnectionText.Text = "Unconfirmed"; MessageText.Text = error.Message; DetailsExpander.IsExpanded = true;
+            connectionFailure = error as BackendException;
+            _lastFailureCanRetry = connectionFailure?.ShouldRetryRead == true;
+            LastError = error.Message; ConnectionText.Text = connectionFailure?.IsConnectionFailure == true ? "Unavailable" : "Unconfirmed"; MessageText.Text = error.Message; DetailsExpander.IsExpanded = true;
             _loadedGains = false; GainTimeText.Text = "State unconfirmed · refresh required"; ReadTimeText.Text = _lastSourceReadText is null ? "Not read yet" : _lastSourceReadText + " · may be stale";
             _loadedVolume = false; VolumeTimeText.Text = "State unconfirmed · refresh required"; UpdateVolumeLabel();
             PresetStatus.Text = _lastPresetReadText is null ? "Not read yet" : _lastPresetReadText + " · last confirmed"; _selectedPresetKey = null; Highlight(_presetButtons, null);
             PresetExplanation.Text = "Preset state is unconfirmed. Refresh to read it.";
-            if (!IsVisible) _tray?.ShowError(error.Message);
+            if (!IsVisible && !automaticRecoveryAttempt) _tray?.ShowError(error.Message);
         }
         finally { _busy = false; SetControls(); completion.TrySetResult(); }
+        if (connectionFailure?.ShouldRetryRead == true && !automaticRecoveryAttempt && !_exitRequested)
+            ScheduleAutomaticRecovery(connectionFailure, purpose == OperationPurpose.Write);
         return succeeded;
     }
+
+    private void ScheduleAutomaticRecovery(BackendException failure, bool afterWriteFailure)
+    {
+        CancelAutomaticRecovery();
+        var cancellation = new CancellationTokenSource();
+        _recoveryCancellation = cancellation;
+        SetRecoveryWaitingUi(0, failure);
+        _recoveryTask = RunAutomaticRecoveryAsync(cancellation, afterWriteFailure);
+    }
+
+    private async Task RunAutomaticRecoveryAsync(CancellationTokenSource cancellation, bool afterWriteFailure)
+    {
+        try
+        {
+            await RunReadRetryLoopAsync(cancellation, afterWriteFailure);
+        }
+        catch (OperationCanceledException) { }
+        finally { CompleteAutomaticWork(cancellation); }
+    }
+
+    private async Task RunReadRetryLoopAsync(CancellationTokenSource cancellation, bool afterWriteFailure = false)
+    {
+        for (var index = 0; index < _recoveryDelays.Count; index++)
+        {
+            var token = cancellation.Token;
+            var delay = _recoveryDelays[index];
+            if (delay > TimeSpan.Zero) await Task.Delay(delay, token);
+            token.ThrowIfCancellationRequested();
+            if (_exitRequested) return;
+            ConnectionText.Text = "Retrying";
+            MessageText.Text = $"Retrying read {index + 1} of {_recoveryDelays.Count}… No setting command will be sent.";
+            var succeeded = await OperateAsync(() => RefreshCoreAsync(preserveCustomDrafts: true), OperationPurpose.Read, automaticRecoveryAttempt: true);
+            if (succeeded)
+            {
+                if (afterWriteFailure) ShowWriteFailureRecoveryResult();
+                return;
+            }
+            if (_exitRequested) return;
+            token.ThrowIfCancellationRequested();
+            if (!_lastFailureCanRetry) return;
+            if (index + 1 < _recoveryDelays.Count)
+                SetRecoveryWaitingUi(index + 1, null);
+        }
+        if (!_exitRequested && ReferenceEquals(_recoveryCancellation, cancellation))
+        {
+            ConnectionText.Text = "Unavailable";
+            MessageText.Text = "Could not reach the speaker after the bounded read-only retries. Check Windows Bluetooth and the speaker's Bluetooth input or control availability, then choose Refresh to try again. No setting command was replayed." +
+                (LastError is null ? "" : "\nLast read: " + LastError);
+            DetailsExpander.IsExpanded = true;
+            UpdateBusyVisual();
+        }
+    }
+
+    internal bool HandleSystemResume()
+    {
+        if (!_initialRefreshStarted || _preview || _backend is null || _exitRequested) return false;
+        if (_recoveryCancellation is not null) return true;
+        var cancellation = new CancellationTokenSource();
+        _recoveryCancellation = cancellation;
+        _recoveryTask = RunResumeReadAsync(cancellation);
+        return true;
+    }
+
+    private async Task RunResumeReadAsync(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            var token = cancellation.Token;
+            if (_busy)
+            {
+                var existingOperation = _operation;
+                await existingOperation.WaitAsync(token);
+            }
+            if (_resumeReadDelay > TimeSpan.Zero) await Task.Delay(_resumeReadDelay, token);
+            token.ThrowIfCancellationRequested();
+            if (_exitRequested) return;
+            ConnectionText.Text = "Finding speaker";
+            MessageText.Text = "Windows resumed. Reading the speaker state without changing settings…";
+            var succeeded = await OperateAsync(() => RefreshCoreAsync(preserveCustomDrafts: true), OperationPurpose.Read, automaticRecoveryAttempt: true);
+            if (!succeeded && _lastFailureCanRetry && !_exitRequested)
+            {
+                SetRecoveryWaitingUi(0, null);
+                await RunReadRetryLoopAsync(cancellation);
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally { CompleteAutomaticWork(cancellation); }
+    }
+
+    private void CompleteAutomaticWork(CancellationTokenSource cancellation)
+    {
+        if (ReferenceEquals(_recoveryCancellation, cancellation)) _recoveryCancellation = null;
+        cancellation.Dispose();
+    }
+
+    private void ShowWriteFailureRecoveryResult()
+    {
+        var hasPendingCustomDrafts = _loadedGains && _sliders.Select((slider, index) => (decimal)slider.Value != _baseline[index]).Any(dirty => dirty);
+        ConnectionText.Text = "Ready";
+        MessageText.Text = hasPendingCustomDrafts
+            ? "Connection restored. No setting was retried. Your pending Custom edits were preserved; choose Send pending if you still want them."
+            : "Connection restored. No setting was retried. Review the refreshed state and choose the setting again only if it still needs changing.";
+        DetailsExpander.IsExpanded = true;
+    }
+
+    private void SetRecoveryWaitingUi(int completedRetries, BackendException? failure)
+    {
+        if (_recoveryDelays.Count == 0)
+        {
+            ConnectionText.Text = "Unavailable";
+            return;
+        }
+        var next = Math.Min(completedRetries, _recoveryDelays.Count - 1);
+        var delay = _recoveryDelays[next];
+        var delayText = delay.TotalSeconds < 1 ? "shortly" : $"in {delay.TotalSeconds:0} seconds";
+        var stage = failure?.Stage is null ? "" : " Connection stage: " + failure.Stage + ".";
+        ConnectionText.Text = "Retrying";
+        MessageText.Text = $"The speaker connection was not available. Retrying read {next + 1} of {_recoveryDelays.Count} {delayText}. No setting command will be sent.{stage}";
+        DetailsExpander.IsExpanded = true;
+        UpdateBusyVisual();
+    }
+
+    private void CancelAutomaticRecovery()
+    {
+        var cancellation = _recoveryCancellation;
+        _recoveryCancellation = null;
+        cancellation?.Cancel();
+    }
+
+    private enum OperationPurpose { Read, Write }
     private void SetControls()
     {
         var available = !_busy && !_exitRequested && (_preview || _backend is not null);

@@ -22,6 +22,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("raw write command is unavailable", RawWriteIsUnavailable),
     ("adapter dispatches through Bluetooth only after parsing", AdapterDispatches),
     ("Edifier manufacturer ID is vendor evidence only", EdifierManufacturerIsCandidateOnly),
+    ("BLE resolution recovers only after the exact target advertisement", BleResolutionRecoversAfterExactTarget),
+    ("BLE resolution ignores wrong addresses and address types", BleResolutionIgnoresWrongTargets),
+    ("BLE resolution reports bounded target discovery timeout and cleans up", BleResolutionTimeoutCleansUp),
+    ("BLE resolution stops before discovery when the adapter is off", BleResolutionAdapterOff),
+    ("BLE resolution cancellation stops and unsubscribes discovery", BleResolutionCancellationCleansUp),
+    ("BLE resolution rejects a concurrent attempt", BleResolutionRejectsConcurrentAttempt),
+    ("BLE connection report retryability excludes unsafe and permanent failures", BleConnectionRetryabilityIsStable),
     ("captured outbound EC vectors are exact", CapturedOutboundVectors),
     ("EQ preset query ignores unrelated notifications and decodes a known single byte", EqPresetQueryDecodesKnownValue),
     ("Custom EQ query preserves raw payload and reports only its first format byte", CustomEqQueryPreservesRawPayload),
@@ -395,6 +402,188 @@ static Task EdifierManufacturerIsCandidateOnly()
     True(candidate.EdifierManufacturerMatch);
     False(candidate.IdentityVerified);
     Contains("vendor candidate only", candidate.Reason);
+    return Task.CompletedTask;
+}
+
+static async Task BleResolutionRecoversAfterExactTarget()
+{
+    const ulong address = 0x020000000001UL;
+    var transport = new FakeBleTransport();
+    transport.ResolveResult = call => Task.FromResult<FakeBleDevice?>(call == 1 ? null : new("target"));
+    transport.Session.OnStart = session => session.Emit(new(address, BluetoothAddressKind.Public));
+    var resolver = new BleDeviceResolver<FakeBleDevice>(transport, TimeSpan.FromSeconds(1));
+
+    var result = await resolver.ResolveAsync(address, BluetoothAddressKind.Public, CancellationToken.None);
+
+    Equal("target", result.Device?.Name);
+    True(result.Report.Resolved);
+    True(result.Report.RecoveryAttempted);
+    Equal("not-found", result.Report.InitialResolution);
+    True(result.Report.TargetAdvertisementObserved);
+    Equal(2, result.Report.ResolutionAttempts);
+    Equal(2, transport.ResolveCalls);
+    Equal(1, transport.CreateSessionCalls);
+    True(transport.Session.StopCalled);
+    True(transport.Session.Disposed);
+    Equal(0, transport.Session.ReceivedSubscriberCount);
+    Equal(0, transport.Session.StoppedSubscriberCount);
+}
+
+static async Task BleResolutionIgnoresWrongTargets()
+{
+    const ulong address = 0x020000000001UL;
+    var transport = new FakeBleTransport();
+    transport.ResolveResult = call => Task.FromResult<FakeBleDevice?>(call == 1 ? null : new("target"));
+    transport.Session.OnStart = session =>
+    {
+        session.Emit(new(0x020000000002UL, BluetoothAddressKind.Public));
+        session.Emit(new(address, BluetoothAddressKind.Random));
+        Equal(1, transport.ResolveCalls);
+        session.Emit(new(address, BluetoothAddressKind.Public));
+    };
+    var resolver = new BleDeviceResolver<FakeBleDevice>(transport, TimeSpan.FromSeconds(1));
+
+    var result = await resolver.ResolveAsync(address, BluetoothAddressKind.Public, CancellationToken.None);
+
+    True(result.Report.Resolved);
+    True(result.Report.TargetAdvertisementObserved);
+    Equal(2, transport.ResolveCalls);
+}
+
+static async Task BleResolutionTimeoutCleansUp()
+{
+    var transport = new FakeBleTransport { ResolveResult = _ => Task.FromResult<FakeBleDevice?>(null) };
+    var resolver = new BleDeviceResolver<FakeBleDevice>(transport, TimeSpan.FromMilliseconds(25));
+    using var overallRequestBudget = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+
+    var result = await resolver.ResolveAsync(0x020000000001UL, BluetoothAddressKind.Public, overallRequestBudget.Token);
+
+    Equal(null, result.Device);
+    Equal("target-advertisement-timeout", result.Report.ErrorCode);
+    Equal("target-not-observed", result.Report.ReadyState);
+    False(overallRequestBudget.IsCancellationRequested);
+    True(transport.Session.StopCalled);
+    True(transport.Session.Disposed);
+    Equal(0, transport.Session.ReceivedSubscriberCount);
+    Equal(0, transport.Session.StoppedSubscriberCount);
+    Equal(1, transport.ResolveCalls);
+}
+
+static async Task BleResolutionAdapterOff()
+{
+    var transport = new FakeBleTransport
+    {
+        ResolveResult = _ => Task.FromResult<FakeBleDevice?>(null),
+        Readiness = BleAdapterReadiness.Off("off")
+    };
+    var resolver = new BleDeviceResolver<FakeBleDevice>(transport, TimeSpan.FromSeconds(1));
+
+    var result = await resolver.ResolveAsync(0x020000000001UL, BluetoothAddressKind.Public, CancellationToken.None);
+
+    Equal("adapter-off", result.Report.ErrorCode);
+    Equal("off", result.Report.AdapterState);
+    False(result.Report.DiscoveryStarted);
+    Equal(0, transport.CreateSessionCalls);
+    Equal(1, transport.ResolveCalls);
+}
+
+static async Task BleResolutionCancellationCleansUp()
+{
+    var transport = new FakeBleTransport { ResolveResult = _ => Task.FromResult<FakeBleDevice?>(null) };
+    var resolver = new BleDeviceResolver<FakeBleDevice>(transport, TimeSpan.FromSeconds(1));
+    using var cancellation = new CancellationTokenSource();
+
+    var pending = resolver.ResolveAsync(0x020000000001UL, BluetoothAddressKind.Public, cancellation.Token);
+    await transport.Session.Started.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    cancellation.Cancel();
+    var result = await pending;
+
+    Equal("request-cancelled", result.Report.ErrorCode);
+    Equal("cancelled", result.Report.ReadyState);
+    True(transport.Session.StopCalled);
+    True(transport.Session.Disposed);
+    Equal(0, transport.Session.ReceivedSubscriberCount);
+    Equal(0, transport.Session.StoppedSubscriberCount);
+    Equal(1, transport.ResolveCalls);
+}
+
+static async Task BleResolutionRejectsConcurrentAttempt()
+{
+    var firstResolution = new TaskCompletionSource<FakeBleDevice?>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var transport = new FakeBleTransport { ResolveResult = _ => firstResolution.Task };
+    var resolver = new BleDeviceResolver<FakeBleDevice>(transport, TimeSpan.FromSeconds(1));
+
+    var first = resolver.ResolveAsync(0x020000000001UL, BluetoothAddressKind.Public, CancellationToken.None);
+    await transport.FirstResolveStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    var concurrent = await resolver.ResolveAsync(0x020000000001UL, BluetoothAddressKind.Public, CancellationToken.None);
+
+    Equal("resolver-busy", concurrent.Report.ErrorCode);
+    Equal(1, transport.ResolveCalls);
+    firstResolution.SetResult(new("target"));
+    var completed = await first;
+    True(completed.Report.Resolved);
+    Equal(0, transport.CreateSessionCalls);
+}
+
+static Task BleConnectionRetryabilityIsStable()
+{
+    foreach (var failureKind in new[]
+    {
+        "adapter-unavailable",
+        "adapter-off",
+        "target-advertisement-timeout",
+        "target-advertised-unresolved",
+        "discovery-failed",
+        "resolution-failed",
+        "resolution-timeout",
+        "gatt-communication-failed",
+        "gatt-communication-timeout"
+    })
+    {
+        True(NativeBluetoothCommands.IsRetryableConnectionFailure("error", failureKind));
+        Equal("connection", NativeBluetoothCommands.ConnectionErrorCategory("error", failureKind));
+    }
+
+    foreach (var failureKind in new[]
+    {
+        "low-energy-unsupported",
+        "central-role-unsupported",
+        "adapter-access-denied",
+        "gatt-access-denied",
+        "request-cancelled",
+        "resolver-busy"
+    })
+    {
+        False(NativeBluetoothCommands.IsRetryableConnectionFailure("error", failureKind));
+    }
+
+    False(NativeBluetoothCommands.IsRetryableConnectionFailure("outcome-uncertain", "gatt-communication-failed"));
+    Equal(null, NativeBluetoothCommands.ConnectionFailureKind("outcome-uncertain", "gatt-communication-failed"));
+    Equal("unsupported", NativeBluetoothCommands.ConnectionErrorCategory("error", "low-energy-unsupported"));
+    Equal("permission", NativeBluetoothCommands.ConnectionErrorCategory("error", "adapter-access-denied"));
+    Equal("permission", NativeBluetoothCommands.ConnectionErrorCategory("error", "gatt-access-denied"));
+    Equal("gatt-access-denied", NativeBluetoothCommands.GattFailureKind(Windows.Devices.Bluetooth.GenericAttributeProfile.GattCommunicationStatus.AccessDenied));
+    Equal("cancelled", NativeBluetoothCommands.ConnectionErrorCategory("cancelled", "request-cancelled"));
+    Equal("busy", NativeBluetoothCommands.ConnectionErrorCategory("error", "resolver-busy"));
+
+    var cancelledResolution = new BleConnectionReport(
+        "02:00:00:00:00:01", "public", "fast-address-resolution", "cancelled", "request-cancelled",
+        "cancelled", false, "not-completed", null, false, false, 10, 1, false, null);
+    var timedOutResolution = NativeBluetoothCommands.ConnectionTimedOut(cancelledResolution);
+    Equal("resolution-timeout", timedOutResolution?.ErrorCode);
+    True(NativeBluetoothCommands.IsRetryableConnectionFailure("timeout", timedOutResolution?.ErrorCode));
+
+    var readyResolution = cancelledResolution with
+    {
+        Stage = "ready",
+        ReadyState = "ready",
+        ErrorCode = null,
+        Message = null,
+        Resolved = true
+    };
+    Equal("gatt", NativeBluetoothCommands.ConnectionStage(readyResolution, "gatt-communication-failed"));
+    Equal("target-discovery", NativeBluetoothCommands.ConnectionStage(cancelledResolution with { Stage = "target-discovery" }, null));
+    Equal("adapter-unavailable", BleAdapterReadiness.MissingRadio().ErrorCode);
     return Task.CompletedTask;
 }
 
@@ -1481,6 +1670,84 @@ internal sealed class FakeBluetoothCommands : IBluetoothCommands
         VolumeCalled = true;
         return Task.FromResult(73);
     }
+}
+
+internal sealed record FakeBleDevice(string Name);
+
+internal sealed class FakeBleTransport : IBleResolutionTransport<FakeBleDevice>
+{
+    public Func<int, Task<FakeBleDevice?>> ResolveResult { get; set; } = _ => Task.FromResult<FakeBleDevice?>(null);
+    public BleAdapterReadiness Readiness { get; set; } = BleAdapterReadiness.Available("on");
+    public FakeAdvertisementSession Session { get; } = new();
+    public TaskCompletionSource FirstResolveStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public int ResolveCalls { get; private set; }
+    public int AdapterCalls { get; private set; }
+    public int CreateSessionCalls { get; private set; }
+
+    public Task<FakeBleDevice?> ResolveAsync(
+        ulong address,
+        BluetoothAddressKind addressType,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ResolveCalls++;
+        FirstResolveStarted.TrySetResult();
+        return ResolveResult(ResolveCalls);
+    }
+
+    public Task<BleAdapterReadiness> GetAdapterReadinessAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        AdapterCalls++;
+        return Task.FromResult(Readiness);
+    }
+
+    public IBleAdvertisementSession CreateAdvertisementSession()
+    {
+        CreateSessionCalls++;
+        return Session;
+    }
+}
+
+internal sealed class FakeAdvertisementSession : IBleAdvertisementSession
+{
+    private Action<BleAdvertisement>? _received;
+    private Action<BleDiscoveryStopped>? _stopped;
+
+    public event Action<BleAdvertisement>? AdvertisementReceived
+    {
+        add => _received += value;
+        remove => _received -= value;
+    }
+
+    public event Action<BleDiscoveryStopped>? Stopped
+    {
+        add => _stopped += value;
+        remove => _stopped -= value;
+    }
+
+    public Action<FakeAdvertisementSession>? OnStart { get; set; }
+    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public bool StopCalled { get; private set; }
+    public bool Disposed { get; private set; }
+    public int ReceivedSubscriberCount => _received?.GetInvocationList().Length ?? 0;
+    public int StoppedSubscriberCount => _stopped?.GetInvocationList().Length ?? 0;
+
+    public void Start()
+    {
+        Started.TrySetResult();
+        OnStart?.Invoke(this);
+    }
+
+    public void Stop()
+    {
+        StopCalled = true;
+        _stopped?.Invoke(new("Success", null));
+    }
+
+    public void Dispose() => Disposed = true;
+
+    public void Emit(BleAdvertisement advertisement) => _received?.Invoke(advertisement);
 }
 
 internal sealed class ScriptedExchange : IEcExchange

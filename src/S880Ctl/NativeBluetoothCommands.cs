@@ -13,6 +13,17 @@ namespace S880Ctl;
 internal sealed class NativeBluetoothCommands : IBluetoothCommands
 {
     private const int MaximumAdvertisementRecords = 50_000;
+    private readonly IBleDeviceResolver<BluetoothLEDevice> _deviceResolver;
+
+    public NativeBluetoothCommands()
+        : this(new BleDeviceResolver<BluetoothLEDevice>(new NativeBleResolutionTransport()))
+    {
+    }
+
+    internal NativeBluetoothCommands(IBleDeviceResolver<BluetoothLEDevice> deviceResolver)
+    {
+        _deviceResolver = deviceResolver;
+    }
 
     public async Task<int> AdapterAsync(ICommandConsole console, CancellationToken cancellationToken)
     {
@@ -195,23 +206,22 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         string? deviceId = null;
         var status = "error";
         var exitCode = ExitCodes.BluetoothError;
+        BleConnectionReport? connection = null;
+        string? gattFailureKind = null;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(command.TimeoutSeconds));
 
         BluetoothLEDevice? device = null;
         try
         {
-            var addressType = command.AddressType == BluetoothAddressKind.Public
-                ? BluetoothAddressType.Public
-                : BluetoothAddressType.Random;
-            device = await WinRtAwait.AwaitAsync(
-                BluetoothLEDevice.FromBluetoothAddressAsync(command.Address, addressType),
-                timeout.Token,
-                static lateDevice => lateDevice?.Dispose());
+            var resolution = await _deviceResolver.ResolveAsync(command.Address, command.AddressType, timeout.Token);
+            connection = resolution.Report;
+            device = resolution.Device;
 
             if (device is null)
             {
-                errors.Add("Windows did not return a Bluetooth LE device for the exact address");
+                timeout.Token.ThrowIfCancellationRequested();
+                errors.Add(connection.Message ?? "Windows did not return a Bluetooth LE device for the exact address");
             }
             else
             {
@@ -227,6 +237,7 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                     if (serviceResult.Status != GattCommunicationStatus.Success)
                     {
                         errors.Add(CommunicationError("service discovery", serviceResult.Status, serviceResult.ProtocolError));
+                        gattFailureKind = GattFailureKind(serviceResult.Status);
                     }
                     else
                     {
@@ -241,6 +252,8 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
 
                             if (characteristicResult.Status != GattCommunicationStatus.Success)
                             {
+                                if (characteristicResult.Status == GattCommunicationStatus.AccessDenied || gattFailureKind is null)
+                                    gattFailureKind = GattFailureKind(characteristicResult.Status);
                                 errors.Add(CommunicationError(
                                     $"characteristic discovery for {service.Uuid}",
                                     characteristicResult.Status,
@@ -277,28 +290,38 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
             {
                 status = "timeout";
                 exitCode = ExitCodes.Timeout;
+                if (connection?.Resolved == true) gattFailureKind = "gatt-communication-timeout";
+                else connection = ConnectionTimedOut(connection);
                 errors.Add($"GATT enumeration exceeded {command.TimeoutSeconds} seconds; Windows connection cancellation is best-effort");
             }
         }
         catch (Exception error)
         {
             errors.Add(error.Message);
+            if (connection?.Resolved == true) gattFailureKind = "gatt-communication-failed";
         }
         finally
         {
             device?.Dispose();
         }
 
+        if (errors.Count > 0 && connection?.Resolved == true)
+            gattFailureKind ??= "gatt-communication-failed";
         var report = new
         {
             command = "gatt",
             status,
             exitCode,
+            errorCategory = ConnectionErrorCategory(status, connection?.ErrorCode ?? gattFailureKind),
+            failureKind = ConnectionFailureKind(status, connection?.ErrorCode ?? gattFailureKind),
+            retryable = IsRetryableConnectionFailure(status, connection?.ErrorCode ?? gattFailureKind),
+            stage = ConnectionStage(connection, gattFailureKind),
             startedAtUtc = startedAt,
             completedAtUtc = DateTimeOffset.UtcNow,
             target = new { address = command.AddressText, addressType = command.AddressType.ToString().ToLowerInvariant() },
             deviceName,
             deviceId,
+            connection,
             cacheMode = "uncached",
             safety = new
             {
@@ -335,6 +358,8 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         var cccdEnabled = false;
         var status = "error";
         var exitCode = ExitCodes.BluetoothError;
+        BleConnectionReport? connection = null;
+        string? gattFailureKind = null;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(command.TimeoutSeconds));
 
@@ -346,11 +371,14 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs>? valueChanged = null;
         try
         {
-            device = await WinRtAwait.AwaitAsync(
-                BluetoothLEDevice.FromBluetoothAddressAsync(command.Address, BluetoothAddressType.Public),
-                timeout.Token,
-                static lateDevice => lateDevice?.Dispose());
-            if (device is null) throw new GattExchangeException("Windows did not return the evidence-bound Bluetooth LE device");
+            var resolution = await _deviceResolver.ResolveAsync(command.Address, BluetoothAddressKind.Public, timeout.Token);
+            connection = resolution.Report;
+            device = resolution.Device;
+            if (device is null)
+            {
+                timeout.Token.ThrowIfCancellationRequested();
+                throw new GattExchangeException(connection.Message ?? "Windows did not return the evidence-bound Bluetooth LE device");
+            }
             deviceName = device.Name;
             deviceId = device.DeviceId;
 
@@ -359,7 +387,9 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 timeout.Token,
                 DisposeLateServices);
             if (serviceResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("source service discovery", serviceResult.Status, serviceResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("source service discovery", serviceResult.Status, serviceResult.ProtocolError),
+                    GattFailureKind(serviceResult.Status));
             if (serviceResult.Services.Count != 1)
                 throw new SourceProtocolException($"expected exactly one source service; found {serviceResult.Services.Count}");
 
@@ -372,9 +402,13 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 service.GetCharacteristicsForUuidAsync(EdifierS880Mk2CnProtocol.TransmitUuid, BluetoothCacheMode.Uncached),
                 timeout.Token);
             if (notifyResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("notify characteristic discovery", notifyResult.Status, notifyResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("notify characteristic discovery", notifyResult.Status, notifyResult.ProtocolError),
+                    GattFailureKind(notifyResult.Status));
             if (transmitResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("transmit characteristic discovery", transmitResult.Status, transmitResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("transmit characteristic discovery", transmitResult.Status, transmitResult.ProtocolError),
+                    GattFailureKind(transmitResult.Status));
             if (notifyResult.Characteristics.Count != 1 || transmitResult.Characteristics.Count != 1)
                 throw new SourceProtocolException("expected exactly one notify and one transmit characteristic");
 
@@ -402,7 +436,9 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 notify.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify),
                 timeout.Token);
             if (subscriptionStatus != GattCommunicationStatus.Success)
-                throw new GattExchangeException($"notification subscription failed: {subscriptionStatus}");
+                throw new GattExchangeException(
+                    $"notification subscription failed: {subscriptionStatus}",
+                    GattFailureKind(subscriptionStatus));
             cccdEnabled = true;
 
             exchange = new GattEcExchange(transmit, sourceInbox);
@@ -419,6 +455,7 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         catch (GattExchangeException error)
         {
             errors.Enqueue(error.Message);
+            gattFailureKind = connection?.ErrorCode ?? error.FailureKind;
             if (exchange?.SetAttempted == true) status = "outcome-uncertain";
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
@@ -433,6 +470,8 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
             {
                 status = exchange?.SetAttempted == true ? "outcome-uncertain" : "timeout";
                 exitCode = ExitCodes.Timeout;
+                if (connection?.Resolved == true) gattFailureKind = "gatt-communication-timeout";
+                else connection = ConnectionTimedOut(connection);
                 errors.Enqueue($"source operation exceeded {command.TimeoutSeconds} seconds; Windows connection cancellation is best-effort");
             }
         }
@@ -477,11 +516,16 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
             operation = command.Operation.ToString().ToLowerInvariant(),
             status,
             exitCode,
+            errorCategory = ConnectionErrorCategory(status, connection?.ErrorCode ?? gattFailureKind),
+            failureKind = ConnectionFailureKind(status, connection?.ErrorCode ?? gattFailureKind),
+            retryable = IsRetryableConnectionFailure(status, connection?.ErrorCode ?? gattFailureKind),
+            stage = ConnectionStage(connection, gattFailureKind),
             startedAtUtc = startedAt,
             completedAtUtc = DateTimeOffset.UtcNow,
             target = new { address = command.AddressText, addressType = "public", evidenceBound = true },
             deviceName,
             deviceId,
+            connection,
             identity = outcome is null ? null : new { outcome.ProductName, outcome.IdentityFrameHex, exactMatch = true },
             gatt = new
             {
@@ -551,6 +595,8 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         var cccdEnabled = false;
         var status = "error";
         var exitCode = ExitCodes.BluetoothError;
+        BleConnectionReport? connection = null;
+        string? gattFailureKind = null;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(command.TimeoutSeconds));
 
@@ -562,11 +608,14 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs>? valueChanged = null;
         try
         {
-            device = await WinRtAwait.AwaitAsync(
-                BluetoothLEDevice.FromBluetoothAddressAsync(command.Address, BluetoothAddressType.Public),
-                timeout.Token,
-                static lateDevice => lateDevice?.Dispose());
-            if (device is null) throw new GattExchangeException("Windows did not return the evidence-bound Bluetooth LE device");
+            var resolution = await _deviceResolver.ResolveAsync(command.Address, BluetoothAddressKind.Public, timeout.Token);
+            connection = resolution.Report;
+            device = resolution.Device;
+            if (device is null)
+            {
+                timeout.Token.ThrowIfCancellationRequested();
+                throw new GattExchangeException(connection.Message ?? "Windows did not return the evidence-bound Bluetooth LE device");
+            }
             deviceName = device.Name;
             deviceId = device.DeviceId;
 
@@ -575,7 +624,9 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 timeout.Token,
                 DisposeLateServices);
             if (serviceResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("EQ service discovery", serviceResult.Status, serviceResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("EQ service discovery", serviceResult.Status, serviceResult.ProtocolError),
+                    GattFailureKind(serviceResult.Status));
             if (serviceResult.Services.Count != 1)
                 throw new EqProtocolException($"expected exactly one EQ service; found {serviceResult.Services.Count}");
 
@@ -588,9 +639,13 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 service.GetCharacteristicsForUuidAsync(EdifierS880Mk2CnProtocol.TransmitUuid, BluetoothCacheMode.Uncached),
                 timeout.Token);
             if (notifyResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("EQ notify characteristic discovery", notifyResult.Status, notifyResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("EQ notify characteristic discovery", notifyResult.Status, notifyResult.ProtocolError),
+                    GattFailureKind(notifyResult.Status));
             if (transmitResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("EQ transmit characteristic discovery", transmitResult.Status, transmitResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("EQ transmit characteristic discovery", transmitResult.Status, transmitResult.ProtocolError),
+                    GattFailureKind(transmitResult.Status));
             if (notifyResult.Characteristics.Count != 1 || transmitResult.Characteristics.Count != 1)
                 throw new EqProtocolException("expected exactly one notify and one transmit characteristic");
 
@@ -618,7 +673,9 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 notify.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify),
                 timeout.Token);
             if (subscriptionStatus != GattCommunicationStatus.Success)
-                throw new GattExchangeException($"notification subscription failed: {subscriptionStatus}");
+                throw new GattExchangeException(
+                    $"notification subscription failed: {subscriptionStatus}",
+                    GattFailureKind(subscriptionStatus));
             cccdEnabled = true;
 
             exchange = new GattEcExchange(transmit, eqInbox);
@@ -646,6 +703,7 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         catch (GattExchangeException error)
         {
             errors.Enqueue(error.Message);
+            gattFailureKind = connection?.ErrorCode ?? error.FailureKind;
             if (exchange?.SetAttempted == true) status = "outcome-uncertain";
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
@@ -660,6 +718,8 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
             {
                 status = exchange?.SetAttempted == true ? "outcome-uncertain" : "timeout";
                 exitCode = ExitCodes.Timeout;
+                if (connection?.Resolved == true) gattFailureKind = "gatt-communication-timeout";
+                else connection = ConnectionTimedOut(connection);
                 errors.Enqueue($"EQ query exceeded {command.TimeoutSeconds} seconds; Windows connection cancellation is best-effort");
             }
         }
@@ -774,11 +834,16 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
             requestedGainDb = command.GainDb,
             status,
             exitCode,
+            errorCategory = ConnectionErrorCategory(status, connection?.ErrorCode ?? gattFailureKind),
+            failureKind = ConnectionFailureKind(status, connection?.ErrorCode ?? gattFailureKind),
+            retryable = IsRetryableConnectionFailure(status, connection?.ErrorCode ?? gattFailureKind),
+            stage = ConnectionStage(connection, gattFailureKind),
             startedAtUtc = startedAt,
             completedAtUtc = DateTimeOffset.UtcNow,
             target = new { address = command.AddressText, addressType = "public", evidenceBound = true },
             deviceName,
             deviceId,
+            connection,
             identity = identityReport,
             gatt = new
             {
@@ -854,6 +919,8 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         var cccdEnabled = false;
         var status = "error";
         var exitCode = ExitCodes.BluetoothError;
+        BleConnectionReport? connection = null;
+        string? gattFailureKind = null;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(command.TimeoutSeconds));
 
@@ -865,11 +932,14 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs>? valueChanged = null;
         try
         {
-            device = await WinRtAwait.AwaitAsync(
-                BluetoothLEDevice.FromBluetoothAddressAsync(command.Address, BluetoothAddressType.Public),
-                timeout.Token,
-                static lateDevice => lateDevice?.Dispose());
-            if (device is null) throw new GattExchangeException("Windows did not return the evidence-bound Bluetooth LE device");
+            var resolution = await _deviceResolver.ResolveAsync(command.Address, BluetoothAddressKind.Public, timeout.Token);
+            connection = resolution.Report;
+            device = resolution.Device;
+            if (device is null)
+            {
+                timeout.Token.ThrowIfCancellationRequested();
+                throw new GattExchangeException(connection.Message ?? "Windows did not return the evidence-bound Bluetooth LE device");
+            }
             deviceName = device.Name;
             deviceId = device.DeviceId;
 
@@ -878,7 +948,9 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 timeout.Token,
                 DisposeLateServices);
             if (serviceResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("volume service discovery", serviceResult.Status, serviceResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("volume service discovery", serviceResult.Status, serviceResult.ProtocolError),
+                    GattFailureKind(serviceResult.Status));
             if (serviceResult.Services.Count != 1)
                 throw new VolumeProtocolException($"expected exactly one volume service; found {serviceResult.Services.Count}");
 
@@ -891,9 +963,13 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 service.GetCharacteristicsForUuidAsync(EdifierS880Mk2CnProtocol.TransmitUuid, BluetoothCacheMode.Uncached),
                 timeout.Token);
             if (notifyResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("volume notify characteristic discovery", notifyResult.Status, notifyResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("volume notify characteristic discovery", notifyResult.Status, notifyResult.ProtocolError),
+                    GattFailureKind(notifyResult.Status));
             if (transmitResult.Status != GattCommunicationStatus.Success)
-                throw new GattExchangeException(CommunicationError("volume transmit characteristic discovery", transmitResult.Status, transmitResult.ProtocolError));
+                throw new GattExchangeException(
+                    CommunicationError("volume transmit characteristic discovery", transmitResult.Status, transmitResult.ProtocolError),
+                    GattFailureKind(transmitResult.Status));
             if (notifyResult.Characteristics.Count != 1 || transmitResult.Characteristics.Count != 1)
                 throw new VolumeProtocolException("expected exactly one notify and one transmit characteristic");
 
@@ -921,7 +997,9 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
                 notify.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify),
                 timeout.Token);
             if (subscriptionStatus != GattCommunicationStatus.Success)
-                throw new GattExchangeException($"notification subscription failed: {subscriptionStatus}");
+                throw new GattExchangeException(
+                    $"notification subscription failed: {subscriptionStatus}",
+                    GattFailureKind(subscriptionStatus));
             cccdEnabled = true;
 
             exchange = new GattEcExchange(transmit, volumeInbox);
@@ -944,6 +1022,7 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
         catch (GattExchangeException error)
         {
             errors.Enqueue(error.Message);
+            gattFailureKind = connection?.ErrorCode ?? error.FailureKind;
             if (exchange?.SetAttempted == true) status = "outcome-uncertain";
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
@@ -958,6 +1037,8 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
             {
                 status = exchange?.SetAttempted == true ? "outcome-uncertain" : "timeout";
                 exitCode = ExitCodes.Timeout;
+                if (connection?.Resolved == true) gattFailureKind = "gatt-communication-timeout";
+                else connection = ConnectionTimedOut(connection);
                 errors.Enqueue($"volume operation exceeded {command.TimeoutSeconds} seconds; Windows connection cancellation is best-effort");
             }
         }
@@ -1003,11 +1084,16 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
             requestedValue = command.Value,
             status,
             exitCode,
+            errorCategory = ConnectionErrorCategory(status, connection?.ErrorCode ?? gattFailureKind),
+            failureKind = ConnectionFailureKind(status, connection?.ErrorCode ?? gattFailureKind),
+            retryable = IsRetryableConnectionFailure(status, connection?.ErrorCode ?? gattFailureKind),
+            stage = ConnectionStage(connection, gattFailureKind),
             startedAtUtc = startedAt,
             completedAtUtc = DateTimeOffset.UtcNow,
             target = new { address = command.AddressText, addressType = "public", evidenceBound = true },
             deviceName,
             deviceId,
+            connection,
             identity = outcome is null ? null : new { outcome.ProductName, outcome.IdentityFrameHex, exactMatch = true },
             gatt = new
             {
@@ -1173,6 +1259,56 @@ internal sealed class NativeBluetoothCommands : IBluetoothCommands
             ? $"{operation} failed: {status}, protocol error 0x{protocolError.Value:X2}"
             : $"{operation} failed: {status}";
 
+    internal static string GattFailureKind(GattCommunicationStatus status) =>
+        status == GattCommunicationStatus.AccessDenied ? "gatt-access-denied" : "gatt-communication-failed";
+
+    internal static string? ConnectionErrorCategory(string status, string? failureKind)
+    {
+        if (string.Equals(status, "outcome-uncertain", StringComparison.Ordinal) || failureKind is null)
+            return null;
+        return failureKind switch
+        {
+            "request-cancelled" => "cancelled",
+            "resolver-busy" => "busy",
+            "low-energy-unsupported" or "central-role-unsupported" => "unsupported",
+            "adapter-access-denied" or "gatt-access-denied" => "permission",
+            _ => "connection"
+        };
+    }
+
+    internal static string? ConnectionFailureKind(string status, string? failureKind) =>
+        string.Equals(status, "outcome-uncertain", StringComparison.Ordinal) ? null : failureKind;
+
+    internal static bool IsRetryableConnectionFailure(string status, string? failureKind)
+    {
+        if (string.Equals(status, "outcome-uncertain", StringComparison.Ordinal)) return false;
+        return failureKind is
+            "adapter-unavailable" or
+            "adapter-off" or
+            "target-advertisement-timeout" or
+            "target-advertised-unresolved" or
+            "discovery-failed" or
+            "resolution-failed" or
+            "resolution-timeout" or
+            "gatt-communication-failed" or
+            "gatt-communication-timeout";
+    }
+
+    internal static BleConnectionReport? ConnectionTimedOut(BleConnectionReport? connection)
+    {
+        if (connection is null || connection.Resolved || connection.ErrorCode != "request-cancelled")
+            return connection;
+        return connection with
+        {
+            ReadyState = "failed",
+            ErrorCode = "resolution-timeout",
+            Message = "Bluetooth LE connection resolution exceeded the command time budget."
+        };
+    }
+
+    internal static string? ConnectionStage(BleConnectionReport? connection, string? gattFailureKind) =>
+        connection?.ErrorCode is not null ? connection.Stage : gattFailureKind is not null ? "gatt" : connection?.Stage;
+
     private static void DisposeLateServices(GattDeviceServicesResult result)
     {
         foreach (var service in result.Services) service.Dispose();
@@ -1228,12 +1364,19 @@ internal sealed class GattEcExchange(GattCharacteristic transmit, NotificationIn
         if (result.Status != GattCommunicationStatus.Success)
         {
             var detail = result.ProtocolError.HasValue ? $", protocol error 0x{result.ProtocolError.Value:X2}" : string.Empty;
-            throw new GattExchangeException($"GATT write failed: {result.Status}{detail}");
+            throw new GattExchangeException(
+                $"GATT write failed: {result.Status}{detail}",
+                NativeBluetoothCommands.GattFailureKind(result.Status));
         }
     }
 }
 
-internal sealed class GattExchangeException(string message) : Exception(message);
+internal sealed class GattExchangeException(
+    string message,
+    string failureKind = "gatt-communication-failed") : Exception(message)
+{
+    internal string FailureKind { get; } = failureKind;
+}
 
 internal static class WinRtAwait
 {
