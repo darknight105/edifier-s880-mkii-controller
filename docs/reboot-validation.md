@@ -18,6 +18,6 @@ The controller was opened after login. Its first source query recorded:
 
 The subsequent `source get`, `eq get`, `eq custom-get`, and `volume get` all completed. Readback was **USB / Monitor / volume 12**, with no setting command sent.
 
-This validates the new discovery fallback on a real post-reboot cache miss for this test setup. It does not establish every firmware/adapter combination, recovery after a speaker power cycle, or physical sleep/wake behavior. The application was not running at the first post-login inspection, so Windows login autostart is tracked separately and is not claimed by this result.
+This validates the new discovery fallback on a real post-reboot cache miss for this test setup. It does not establish every firmware/adapter combination, recovery after a speaker power cycle, or physical sleep/wake behavior. Windows Shell event 9707 subsequently confirmed that the registered tray-start command was invoked at 06:35:08, after the manual test launch at 06:35:02. The initial absence of a process was therefore not sufficient evidence of broken autostart. A separate first `--start-in-tray` host-process test remained running without opening the panel; an already-running instance makes a secondary tray-start exit quietly. No startup registration was changed during this check.
 
 Raw local logs and personal device identifiers are intentionally excluded from this public note.

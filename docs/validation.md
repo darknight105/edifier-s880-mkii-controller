@@ -27,6 +27,6 @@ The optional self-contained publishing script was syntax-checked, but a self-con
 - Installed configured build: actual first-open read passed in USB with Monitor and volume 12/30.
 - Windows Classic audio Connect in USB: failed; no automatic Classic/A2DP reconnect is claimed.
 - Real PC restart with the speaker left in USB: **passed** on 2026-09-09; first lookup missed, automatic discovery found the target, second lookup resolved, all four reads completed. See [reboot validation](reboot-validation.md).
-- Physical sleep/wake and speaker power cycle: **pending**. Windows login autostart is separate and not yet established.
+- Physical sleep/wake and speaker power cycle: **pending**. Windows Shell logs confirmed delayed invocation of login autostart, and a separate first tray-start test remained running; see the reboot validation note.
 
 The recovery code uses the same protocol frames and pre-write identity/confirmation rules. No persistent exclusive GATT lease, repeated pairing, radio toggle, or driver reset was added. Initial build warnings concerned unavailable NuGet vulnerability metadata; later publishing completed successfully. An online dependency security audit is not claimed.
