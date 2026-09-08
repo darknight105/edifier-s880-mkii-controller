@@ -1,8 +1,10 @@
-# EDIFIER S880 MKII Controller
+# EDIFIER S880 MKII — Windows Speaker Controller
 
 A compact Windows controller for the **EDIFIER S880 MKII**, using your computer's Bluetooth adapter. Change inputs, adjust speaker volume, select sound presets, and edit the saved six-band Custom EQ from one small desktop panel.
 
 This project targets the **China-market S880 MKII that uses EDIFIER Connect**. The international **EDIFIER ConneX** app does not discover this variant. Other speaker models and firmware variants have not been validated. This is an independent project, not an official EDIFIER application.
+
+**Taskbar tray shortcut:** single-click for USB, double-click to open the panel, and right-click for the menu. See [Taskbar tray controls](#taskbar-tray-controls).
 
 ## Screenshots
 
@@ -34,6 +36,18 @@ Light is the default theme. The images below are renders of the actual WPF inter
 
 Factory presets and saved Custom values are separate. The speaker does not expose a verified six-band curve for each factory preset, so the editor does not invent one.
 
+## Taskbar tray controls
+
+Use the small speaker icon in the Windows taskbar notification area, beside the clock. If it is hidden, open the tray overflow menu to find it.
+
+| Action | What happens |
+| --- | --- |
+| **Single left-click** | Switches the speaker directly to **USB**, without opening the panel. |
+| **Double left-click** | Opens or restores the control panel and cancels the pending single-click USB action. |
+| **Right-click** | Opens the menu: show the panel, choose an input, refresh status, or exit. |
+
+The USB action waits briefly for the Windows double-click interval, so a double-click can open the panel without first switching inputs. Closing the window with **X** keeps the controller running in the tray; choose **Exit** from the right-click menu to quit.
+
 ## Requirements
 
 - Windows x64 with a working Bluetooth/BLE adapter.
@@ -46,8 +60,8 @@ The project has been exercised on Windows 11. Its Windows API target is Windows 
 ## Build and test
 
 ```powershell
-git clone https://github.com/darknight105/edifier-s880-controller.git
-cd edifier-s880-controller
+git clone https://github.com/darknight105/edifier-s880-mkii-controller.git
+cd edifier-s880-mkii-controller
 dotnet build .\S880Controller.slnx -c Release --disable-build-servers -m:1
 dotnet run --project .\tests\S880Ctl.Tests\S880Ctl.Tests.csproj -c Release --no-build
 ```
