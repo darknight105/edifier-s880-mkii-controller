@@ -51,6 +51,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _recoveryCancellation;
     private Task _recoveryTask = Task.CompletedTask;
     private bool _lastFailureCanRetry;
+    private bool _controlAsleep;
     public bool LastOperationSucceeded { get; private set; }
     public string? LastError { get; private set; }
     internal double LifecycleDraft { get => _sliders[2].Value; set => _sliders[2].Value = value; }
@@ -343,11 +344,12 @@ public partial class MainWindow : Window
         MessageText.Text = automaticRecoveryAttempt ? "Reading the speaker again…" : purpose == OperationPurpose.Read ? "Finding and reading the speaker…" : "Connecting to update the speaker…";
         SetControls();
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); _operation = completion.Task;
-        try { await action(); succeeded = true; LastOperationSucceeded = true; ConnectionText.Text = purpose == OperationPurpose.Read ? "Ready" : "Updated"; MessageText.Text = _operationNote ?? "Operation complete. The display shows the latest read result."; DetailsExpander.IsExpanded = false; }
+        try { await action(); succeeded = true; LastOperationSucceeded = true; ConnectionText.Text = purpose == OperationPurpose.Read ? "Ready" : "Updated"; MessageText.Text = _operationNote ?? "Operation complete. The display shows the latest read result."; DetailsExpander.IsExpanded = false; SetControlWakeHelp(false); }
         catch (Exception error)
         {
             connectionFailure = error as BackendException;
             _lastFailureCanRetry = connectionFailure?.ShouldRetryRead == true;
+            SetControlWakeHelp(connectionFailure?.FailureKind == "target-advertisement-timeout");
             LastError = error.Message; ConnectionText.Text = connectionFailure?.IsConnectionFailure == true ? "Unavailable" : "Unconfirmed"; MessageText.Text = error.Message; DetailsExpander.IsExpanded = true;
             _loadedGains = false; GainTimeText.Text = "State unconfirmed · refresh required"; ReadTimeText.Text = _lastSourceReadText is null ? "Not read yet" : _lastSourceReadText + " · may be stale";
             _loadedVolume = false; VolumeTimeText.Text = "State unconfirmed · refresh required"; UpdateVolumeLabel();
@@ -406,8 +408,10 @@ public partial class MainWindow : Window
         if (!_exitRequested && ReferenceEquals(_recoveryCancellation, cancellation))
         {
             ConnectionText.Text = "Unavailable";
-            MessageText.Text = "Could not reach the speaker after the bounded read-only retries. Check Windows Bluetooth and the speaker's Bluetooth input or control availability, then choose Refresh to try again. No setting command was replayed." +
-                (LastError is null ? "" : "\nLast read: " + LastError);
+            MessageText.Text = _controlAsleep
+                ? "Could not reach the speaker after the read-only retries. No setting command was replayed.\n" + Backend.ControlWakeSteps
+                : "Could not reach the speaker after the bounded read-only retries. Check Windows Bluetooth and the speaker's Bluetooth input or control availability, then choose Refresh to try again. No setting command was replayed." +
+                    (LastError is null ? "" : "\nLast read: " + LastError);
             DetailsExpander.IsExpanded = true;
             UpdateBusyVisual();
         }
@@ -477,7 +481,7 @@ public partial class MainWindow : Window
         var delayText = delay.TotalSeconds < 1 ? "shortly" : $"in {delay.TotalSeconds:0} seconds";
         var stage = failure?.Stage is null ? "" : " Connection stage: " + failure.Stage + ".";
         ConnectionText.Text = "Retrying";
-        MessageText.Text = $"The speaker connection was not available. Retrying read {next + 1} of {_recoveryDelays.Count} {delayText}. No setting command will be sent.{stage}";
+        MessageText.Text = $"The speaker connection was not available. Retrying read {next + 1} of {_recoveryDelays.Count} {delayText}. No setting command will be sent.{stage}{ControlWakeSuffix}";
         DetailsExpander.IsExpanded = true;
         UpdateBusyVisual();
     }
@@ -579,7 +583,7 @@ public partial class MainWindow : Window
     private void ResizeForContent()
     {
         if (!IsLoaded || _rendering || WindowState != WindowState.Normal) return;
-        var target = 410d + (CustomExpander.IsExpanded ? 190 : 0) + (DetailsExpander.IsExpanded ? 155 : 0);
+        var target = 410d + (CustomExpander.IsExpanded ? 190 : 0) + (DetailsExpander.IsExpanded ? 155 + (_controlAsleep ? 120 : 0) : 0);
         target = Math.Max(MinHeight, Math.Min(target, SystemParameters.WorkArea.Height - 32));
         var oldHeight = ActualHeight > 0 ? ActualHeight : Height;
         BeginAnimation(HeightProperty, null); Height = target;
@@ -595,6 +599,19 @@ public partial class MainWindow : Window
     }
     private static string Timestamp(JsonElement report) => DateTimeOffset.Parse(report.GetProperty("completedAtUtc").GetString()!, CultureInfo.InvariantCulture).ToLocalTime().ToString("HH:mm:ss");
     private void LogsClick(object sender, RoutedEventArgs e) { if (_backend is not null) Process.Start(new ProcessStartInfo("explorer.exe", _backend.DataDirectory) { UseShellExecute = true }); }
+    private void BluetoothSettingsClick(object sender, RoutedEventArgs e)
+    {
+        try { Process.Start(new ProcessStartInfo("ms-settings:bluetooth") { UseShellExecute = true }); }
+        catch (Exception error) { ShowSettingsError("Could not open Windows Bluetooth settings: " + error.Message); }
+    }
+    private void SetControlWakeHelp(bool visible)
+    {
+        if (_controlAsleep == visible) return;
+        _controlAsleep = visible;
+        BluetoothSettingsButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        ResizeForContent();
+    }
+    private string ControlWakeSuffix => _controlAsleep ? "\n" + Backend.ControlWakeSteps : "";
     internal void Render(string path)
     {
         _rendering = true;

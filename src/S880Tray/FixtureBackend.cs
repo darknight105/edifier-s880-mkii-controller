@@ -94,7 +94,11 @@ internal sealed class FixtureBackend : IControllerBackend
         var uncertainTakesPrecedence = uncertainMessage.StartsWith("The operation result is unconfirmed;", StringComparison.Ordinal) && !uncertainMessage.Contains("Switch the speaker", StringComparison.Ordinal) && !uncertainMessage.Contains("No setting", StringComparison.Ordinal);
         var otherFailuresUnchanged = Backend.DescribeFailure(other, log) == "The operation did not complete. Check the speaker and Bluetooth, then refresh.";
         var structuredRetryClassification = Backend.ShouldRetryRead(source) && !Backend.ShouldRetryRead(uncertain) && !Backend.ShouldRetryRead(cancelled) && !Backend.ShouldRetryRead(unsupported) && !Backend.ShouldRetryRead(other);
-        return new { passed = discoveryStageAndNextStep && explicitSafetyEvidence && noUnsupportedSafetyClaim && uncertainTakesPrecedence && otherFailuresUnchanged && structuredRetryClassification, discoveryStageAndNextStep, explicitSafetyEvidence, noUnsupportedSafetyClaim, uncertainTakesPrecedence, otherFailuresUnchanged, structuredRetryClassification, sourceMessage, eqMessage, uncertainMessage };
+        var asleep = JsonSerializer.SerializeToElement(new { status = "error", errorCategory = "connection", retryable = true, failureKind = "target-advertisement-timeout", stage = "target-discovery", safety = new { setAttempted = false, attemptedWritesHex = Array.Empty<string>() } });
+        var asleepMessage = Backend.DescribeFailure(asleep, log);
+        var wakeStepsOnlyForSilentTarget = asleepMessage.Contains(Backend.ControlWakeSteps, StringComparison.Ordinal) && asleepMessage.Contains("No setting command was sent.", StringComparison.Ordinal) &&
+            !sourceMessage.Contains("asleep", StringComparison.Ordinal) && !eqMessage.Contains("asleep", StringComparison.Ordinal);
+        return new { passed = discoveryStageAndNextStep && explicitSafetyEvidence && noUnsupportedSafetyClaim && uncertainTakesPrecedence && otherFailuresUnchanged && structuredRetryClassification && wakeStepsOnlyForSilentTarget, wakeStepsOnlyForSilentTarget, discoveryStageAndNextStep, explicitSafetyEvidence, noUnsupportedSafetyClaim, uncertainTakesPrecedence, otherFailuresUnchanged, structuredRetryClassification, sourceMessage, eqMessage, uncertainMessage };
     }
 
     internal static object CheckThemeStorage()

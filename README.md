@@ -106,7 +106,15 @@ In one observed recovery, pairing and connecting the speaker's **audio endpoint 
 
 However, a separate attempt to connect Bluetooth audio using Windows Settings while the speaker stayed in USB failed. An uncached Classic service query also did not establish an audio connection. This update therefore does not claim to force the Classic/A2DP profile to connect or wake a speaker that is not advertising. If discovery remains unavailable, select Bluetooth on the speaker and connect it in Windows, then retry control.
 
-A real PC restart with the speaker left in USB has now passed: the first address lookup returned no device, automatic discovery observed the target, and the second lookup resolved it. Source, preset, Custom gains and volume were then read successfully. This is one tested reboot scenario, not a guarantee for every adapter or firmware. Physical sleep/wake and speaker power-cycle acceptance remain pending; Windows login autostart is a separate check. See [reboot validation](docs/reboot-validation.md).
+A second observation confirmed the same boundary after the speaker's mains power was removed while it was set to USB. The exact BLE target was absent from both passive and active scans, including while the Bluetooth light was flashing, until Windows Settings connected the speaker's audio endpoint. Advertisements then appeared immediately, reads passed, the tray click switched back to USB, and BLE control remained available in USB after the audio connection dropped. When the controller reports that the target did not advertise, the Details area now shows these three steps and an **Open Bluetooth settings** button:
+
+1. Use the remote to select Bluetooth input.
+2. Open Windows Bluetooth settings and connect EDIFIER S880 MKII.
+3. Click the tray icon once to switch back to USB.
+
+Whether BLE control also sleeps after a long idle period in USB, without a power loss, has not been established.
+
+A real PC restart with the speaker left in USB has now passed: the first address lookup returned no device, automatic discovery observed the target, and the second lookup resolved it. Source, preset, Custom gains and volume were then read successfully. This is one tested reboot scenario, not a guarantee for every adapter or firmware. A speaker power cycle into USB requires the manual wake steps above. Physical PC sleep/wake acceptance remains pending; Windows login autostart is a separate check. See [reboot validation](docs/reboot-validation.md).
 
 ## Validation and limits
 

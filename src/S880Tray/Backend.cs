@@ -91,6 +91,14 @@ internal sealed class Backend : IControllerBackend
         }
     }
 
+    // Observed on 2026-10-28: after a power loss while set to USB, the speaker stops advertising its BLE control
+    // service until a Classic Bluetooth audio connection has been made once.
+    internal const string ControlWakeSteps =
+        "The speaker's Bluetooth control appears to be asleep. This can happen after it loses power while set to USB. To wake it:" +
+        "\n1. Use the remote to select Bluetooth input (the Bluetooth light flashes)." +
+        "\n2. Open Windows Bluetooth settings and connect EDIFIER S880 MKII." +
+        "\n3. Click the tray icon once to switch back to USB.";
+
     internal static string DescribeFailure(JsonElement report, string reportPath)
     {
         if (report.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.String && status.GetString() == "outcome-uncertain")
@@ -108,7 +116,7 @@ internal sealed class Backend : IControllerBackend
                 "adapter-off" => "Turn on Bluetooth in Windows.",
                 "adapter-unavailable" => "Check that the Windows Bluetooth adapter is enabled.",
                 "low-energy-unsupported" or "central-role-unsupported" => "This Bluetooth adapter cannot provide the required control connection.",
-                "target-advertisement-timeout" => "The speaker control target was not discovered. Check Windows Bluetooth and make the speaker's Bluetooth input or control service available.",
+                "target-advertisement-timeout" => ControlWakeSteps,
                 "target-advertised-unresolved" => "The speaker was discovered, but Windows could not open its control endpoint. Keep it powered on and try the read again.",
                 _ => "Keep the speaker powered on and nearby."
             };

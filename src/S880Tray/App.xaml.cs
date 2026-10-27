@@ -89,7 +89,7 @@ public partial class App : Application
                 var fixture = new FixtureBackend();
                 var checkWindow = new MainWindow(fixture, false);
                 var checks = JsonSerializer.SerializeToElement(await checkWindow.RunOfflineChecksAsync(fixture));
-                var startupRefreshChecks = JsonSerializer.SerializeToElement(await StartupRefreshSmoke.RunAsync());
+                var startupRefreshChecks = JsonSerializer.SerializeToElement(await StartupRefreshSmoke.RunAsync(Path.Combine(Path.GetDirectoryName(path)!, "wake-help.png")));
                 var trayStartupChecks = JsonSerializer.SerializeToElement(TrayStartupChecks.Run());
                 var passed = payloadAvailabilityValidated && checks.GetProperty("passed").GetBoolean() && startupRefreshChecks.GetProperty("passed").GetBoolean() && trayStartupChecks.GetProperty("passed").GetBoolean();
                 await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new { status = passed ? "passed" : "failed", mode = "offline-preview", hardwareAccess = false, realInvokedCommands = Array.Empty<string>(), embeddedPayloadAvailable, missingBackendRejected, payloadAvailabilityValidated, checks, startupRefreshChecks, trayStartupChecks, preview = image, note = "Fixture is created only in explicit offline smoke mode; startup refresh uses fixture queries, tray gesture tests use a manual clock, and startup registration tests use an in-memory registry." }, new JsonSerializerOptions { WriteIndented = true }));

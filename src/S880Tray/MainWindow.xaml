@@ -71,7 +71,10 @@
         <Button Grid.Column="1" Content="Logs" Click="LogsClick" Padding="8,2" Margin="0" ToolTip="Open detailed operation reports"/>
       </Grid>
       <Expander x:Name="DetailsExpander" Header="Details" Margin="4,3,4,0" FontSize="10" Foreground="{DynamicResource MutedBrush}">
-        <Border Background="{DynamicResource DetailsBrush}" Padding="9" CornerRadius="3" Margin="0,5,0,0"><TextBlock x:Name="MessageText" Text="Refresh to read the speaker. Closing this window keeps the controller in the tray." TextWrapping="Wrap" Foreground="{DynamicResource DetailsTextBrush}" FontSize="11"/></Border>
+        <Border Background="{DynamicResource DetailsBrush}" Padding="9" CornerRadius="3" Margin="0,5,0,0"><StackPanel>
+          <TextBlock x:Name="MessageText" Text="Refresh to read the speaker. Closing this window keeps the controller in the tray." TextWrapping="Wrap" Foreground="{DynamicResource DetailsTextBrush}" FontSize="11"/>
+          <Button x:Name="BluetoothSettingsButton" Content="Open Bluetooth settings" Click="BluetoothSettingsClick" HorizontalAlignment="Left" Padding="8,2" Margin="0,7,0,0" Visibility="Collapsed" ToolTip="Open Windows Bluetooth settings to connect EDIFIER S880 MKII"/>
+        </StackPanel></Border>
       </Expander>
     </StackPanel>
   </ScrollViewer>

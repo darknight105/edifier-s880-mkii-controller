@@ -12,7 +12,7 @@ internal static class StartupRefreshSmoke
     private static readonly string[] ReadCommands = ["source get", "eq get", "eq custom-get", "volume get"];
     private static readonly TimeSpan[] FastRecoveryDelays = [TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(10)];
 
-    internal static async Task<object> RunAsync()
+    internal static async Task<object> RunAsync(string? wakeHelpImage = null)
     {
         var fixture = new FixtureBackend { DelayNext = true };
         var window = CreateOffscreen(fixture);
@@ -62,6 +62,7 @@ internal static class StartupRefreshSmoke
         await autoWindow.WaitForRecoveryAsync();
         var failureThenAutomaticSuccess = autoWindow.LastOperationSucceeded && autoWindow.LastError is null && autoWindow.LifecycleConnection == "Ready" &&
             autoFixture.Commands.SequenceEqual(new[] { "source get", "source get", "eq get", "eq custom-get", "volume get" }) && autoFixture.MaximumConcurrent == 1;
+        var recoveryHidesWakeHelp = autoWindow.BluetoothSettingsButton.Visibility == Visibility.Collapsed;
         autoWindow.Hide();
 
         var exhaustionFixture = new FixtureBackend { ConnectionFailuresRemaining = 4 };
@@ -74,6 +75,9 @@ internal static class StartupRefreshSmoke
             exhaustionWindow.MessageText.Text.Contains("No setting command was replayed", StringComparison.Ordinal) &&
             !exhaustionWindow.MessageText.Text.Contains("phone", StringComparison.OrdinalIgnoreCase) &&
             exhaustionFixture.Commands.SequenceEqual(Enumerable.Repeat("source get", 4)) && exhaustionFixture.MaximumConcurrent == 1;
+        var exhaustionShowsWakeSteps = exhaustionWindow.MessageText.Text.Contains(Backend.ControlWakeSteps, StringComparison.Ordinal) &&
+            exhaustionWindow.BluetoothSettingsButton.Visibility == Visibility.Visible;
+        if (wakeHelpImage is not null) { exhaustionWindow.BeginAnimation(Window.HeightProperty, null); exhaustionWindow.Height = 685; exhaustionWindow.Render(wakeHelpImage); }
         exhaustionWindow.Hide();
 
         var cancellationFixture = new FixtureBackend { ConnectionFailuresRemaining = 1 };
@@ -136,7 +140,8 @@ internal static class StartupRefreshSmoke
 
         var passed = noReadBeforeFirstPanel && resumeBeforeFirstPanelIsQuiet && startupLabelClear && returnedWhileReadInProgress && firstPanelAutoRead &&
             reopenDoesNotReadAgain && reopenPreservesDraft && initialFailureClearsLoading && manualRefreshRecovers && usbQueuesBehindInitialRead &&
-            failureThenAutomaticSuccess && retryExhaustionStops && manualRefreshCancelsPendingRetry && exitCancelsPendingRetry && automaticReadPreservesDraft && noSetReplayAfterWriteFailure && resumeQueuesOneReadAfterBusy;
+            failureThenAutomaticSuccess && retryExhaustionStops && manualRefreshCancelsPendingRetry && exitCancelsPendingRetry && automaticReadPreservesDraft && noSetReplayAfterWriteFailure && resumeQueuesOneReadAfterBusy &&
+            exhaustionShowsWakeSteps && recoveryHidesWakeHelp;
         return new
         {
             passed,
@@ -153,6 +158,8 @@ internal static class StartupRefreshSmoke
             usbQueuesBehindInitialRead,
             failureThenAutomaticSuccess,
             retryExhaustionStops,
+            exhaustionShowsWakeSteps,
+            recoveryHidesWakeHelp,
             manualRefreshCancelsPendingRetry,
             exitCancelsPendingRetry,
             automaticReadPreservesDraft,
